@@ -1,8 +1,13 @@
 from abc import ABC, abstractmethod
 import inspect
+import logging
+import json
 import sys
 
-from typing import Optional
+from json.decoder import JSONDecodeError
+
+from typing import Optional, Dict, List
+from pydantic import BaseModel, ValidationError
 
 from hotel.external_api import (
     get_reservations_for_given_checkin_date,
@@ -12,6 +17,17 @@ from hotel.external_api import (
 )
 
 from hotel.models import Stay, Guest, Hotel
+
+
+class Event(BaseModel):
+    Name: str
+    Value: Dict[str, str]
+
+
+class Payload(BaseModel):
+    HotelId: str
+    IntegrationId: str 
+    Events: List[Event]
 
 
 class PMS(ABC):
@@ -72,10 +88,48 @@ class PMS(ABC):
         raise NotImplementedError
 
 
+def handle_exception(message):
+    logging.error(message)
+    # Store details about failed webhook for future processing
+
+
 class PMS_Mews(PMS):
     def clean_webhook_payload(self, payload: str) -> dict:
-        # TODO: Implement the method
-        return {}
+
+        # Test that the payload is a valid JSON object
+        try:
+            payload_dict = json.loads(payload)
+
+        except JSONDecodeError as j:
+            handle_exception(f"A jsonDecodeError has occured: {j}. Stopping webhook processing")
+            return {"payload_valid": False}
+
+        except Exception as e:
+            handle_exception(f"An exception has occured: {e}. Stopping webhook processing")
+            return {"payload_valid": False}
+
+        # Test that the payload follows the appropriate schema.
+        # I decided to use pydantic for validation because we are already using typing
+        # But it can also be done by hand
+        try:
+            p = Payload(**payload_dict)
+
+        except ValidationError as v:
+            handle_exception(f"A payload validation error has occured: {v}. Stopping webhook processing")
+            return {"payload_valid": False}
+
+        except Exception as e:
+            handle_exception(f"An exception has occured: {e}. Stopping webhook processing")
+            return {"payload_valid": False}
+
+        # I could also add some code here to test the format of the Id strings
+        # if that is a requirement for validation of the API payload. 
+        # The string formatting for the corresponding db model fields don't
+        # have that same constraint on the string format
+
+        payload_dict["payload_valid"] = True
+        return payload_dict
+
 
     def handle_webhook(self, webhook_data: dict) -> bool:
         # TODO: Implement the method
@@ -92,10 +146,19 @@ class PMS_Mews(PMS):
 
 def get_pms(name):
     fullname = "PMS_" + name.capitalize()
+
+    print("fullname", fullname)
+
     # find all class names in this module
     # from https://stackoverflow.com/questions/1796180/
+
     current_module = sys.modules[__name__]
+
+    print("current_module", current_module)
+
     clsnames = [x[0] for x in inspect.getmembers(current_module, inspect.isclass)]
+
+    print("clsnames", clsnames)
 
     # if we have a PMS class for the given name, return an instance of it
     return getattr(current_module, fullname)() if fullname in clsnames else False
