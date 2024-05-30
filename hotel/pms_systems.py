@@ -1,6 +1,9 @@
 from abc import ABC, abstractmethod
 import inspect
 import logging
+from datetime import datetime
+import phonenumbers
+import time
 import json
 import sys
 
@@ -8,6 +11,8 @@ from json.decoder import JSONDecodeError
 
 from typing import Optional, Dict, List
 from pydantic import BaseModel, ValidationError
+
+from django.db.utils import IntegrityError
 
 from hotel.external_api import (
     get_reservations_for_given_checkin_date,
@@ -17,6 +22,7 @@ from hotel.external_api import (
 )
 
 from hotel.models import Stay, Guest, Hotel
+from hotel.constants import RESERVATION_STATUS_MAPPING
 
 
 class Event(BaseModel):
@@ -93,6 +99,56 @@ def handle_exception(message):
     # Store details about failed webhook for future processing
 
 
+def api_call_with_retries(apiname, *args):
+    i = 0
+    while i < 20:
+        try:
+            payload = apiname(*args)
+            try:
+                payload_dict = json.loads(payload)
+                return payload_dict
+            except JSONDecodeError as j:
+                logging.error(f"A JSONDecodeError occured on retry {i}: {j}. Retrying again...")
+            except Exception as e:
+                logging.error(f"An Exception occured on retry {i}: {e}. Retrying again...")
+
+        except APIError as a:
+            logging.error(f"APIError occured on retry {i}: {a}. Retrying again...")
+        except Exception as e:
+            logging.error(f"An API Exception occured on retry {i}: {e}. Retrying again...")
+
+        time.sleep(1)
+        i = i + 1
+    
+    raise Exception(f"Api Call for {apiname.__name__}. failed after 20 retries. "
+        "Raising Exception and preparing report")
+    # Store data or send a notification in the system about failed API call
+
+
+def dateisvalid(datestr, dateformat, propertyallowsnull):
+    # dateformat should be stored somewhere for the API
+    # propertyallowsnull should be stored somewhere for the specific hotel
+    # In this case I am using it as hardcoded values as an example
+    if datestr == None or datestr == '':
+        if propertyallowsnull:
+            return True
+        else:
+            return False
+    else:
+        try:
+            date = datetime.strptime(datestr, dateformat)
+            return True
+        except ValueError:
+            return False
+
+
+def phoneisvalid(phone, e164formatted):
+    x = phonenumbers.parse(phone, None)
+    # Not supplying a country because maybe the guest doesn't have a
+    # phone from his country because he is travelling a lot
+    return(phonenumbers.is_valid_number(x))
+
+
 class PMS_Mews(PMS):
     def clean_webhook_payload(self, payload: str) -> dict:
 
@@ -131,8 +187,190 @@ class PMS_Mews(PMS):
         return payload_dict
 
 
+    # make atomic
     def handle_webhook(self, webhook_data: dict) -> bool:
-        # TODO: Implement the method
+        if not webhook_data["payload_valid"]:
+            logging.error("Webhook payload invalid. Stoping webhook processing")
+            # store information about failed webhook
+            return False
+
+        webhook_hotel_id = webhook_data["HotelId"]
+
+        for event in webhook_data["Events"]:
+            event_name = event["Name"]
+
+            if event_name == "ReservationUpdated":
+                # Get reservation data:
+                reservation_id = event["Value"]["ReservationId"]
+                logging.info("Processing reservation update event for reservation Id {reservation_id}")
+
+                # To do: move the next 20 lines out to a separate function for readability
+                try:
+                    reservation_details = api_call_with_retries(
+                        get_reservation_details,
+                        reservation_id
+                    )
+                except Exception as e:
+                    logging.error(f"Api call for get_reservation_details failed with Exception '{e}'. "
+                        "Stopping webhook processing")
+                    return False
+
+                reservation_hotel_id = reservation_details["HotelId"]
+                if reservation_hotel_id != webhook_hotel_id:
+                    logging.error("reservation id in webhook payload {webhook_hotel_id} "
+                        "and in api response payload {reservation_hotel_id} doesn't "
+                        "match. Preparing a bug report and stopping webhook processing")
+                    # Call function/method to prepare and post bug report or store
+                    # information somewhere for later processing
+                    return False
+
+
+                # Get Guest data:
+                reservation_guest_id = reservation_details["GuestId"]
+                
+                try:
+                    hotel = Hotel.objects.get(pms_hotel_id=reservation_hotel_id)
+                except Hotel.DoesNotExist:
+                    # I wasn't sure what the action should be in case the hotel doesn't
+                    # exist in the db, if I should create it, or raise an error.
+                    pass 
+
+                try:
+                    reservation_guest_details = api_call_with_retries(
+                        get_guest_details,
+                        reservation_guest_id
+                    )
+                except Exception as e:
+                    logging.error(f"API call for get_guest_details failed with Exception '{e}'. "
+                        "Stopping Webhook processing.")
+                    return False
+
+                reservation_guest_name = reservation_guest_details["Name"]
+                if reservation_guest_name == "":
+                    reservation_guest_name = None
+                reservation_guest_phone = reservation_guest_details["Phone"]
+
+                if not phoneisvalid(reservation_guest_phone, True):
+                    # In case the phone is important for reasons other than as a
+                    # unique id on the user, an error should be raised here
+                    pass
+
+
+                # For the case where the guest name on the reservation
+                # doesn't match the guest name for that guestId in the db:
+                # we store or update the reservation/stay
+                # even though the name doesn't match that in the database.
+                # Because the phone is like a unique identifier for the guest, not the name.
+                # And also, the reservation was already created, so there is priority for
+                # the stays in the db to reflect that
+                # We could also raise and error, or just a warning and notify an admin
+
+                # I also don't know if there is any logic for the name, for example
+                # if only the first name is provided. But because we use the phone as
+                # the id, I am allowing that to be accepted.
+
+                try:
+                    guest, created = Guest.objects.get_or_create(
+                        phone=reservation_guest_phone, 
+                        defaults = {"name": reservation_guest_name})
+                except IntegrityError as e:
+                    logging.error("Encountered error when get_or_create on guest: {e}"
+                        "Stopping webhook processing")
+                    return False
+                except:
+                    return False
+
+                # But we can still catch the name mismatch:
+                if guest.name != reservation_guest_name:
+                    # Maybe update the name in the db to be the name in the latest reservation
+                    # Or notify an admin or raise an exception
+                    pass
+
+                # Create or Update Stay
+
+                reservation_status = reservation_details["Status"]
+
+                if reservation_status in RESERVATION_STATUS_MAPPING:
+                    status = RESERVATION_STATUS_MAPPING[reservation_status]
+                else:
+                    # log error and return false
+                    return False
+
+                reservation_checkin = reservation_details["CheckInDate"]
+                checkin_isvalid = dateisvalid(reservation_checkin, "%Y-%m-%d", True)
+                reservation_checkout = reservation_details["CheckOutDate"]
+                checkout_isvalid = dateisvalid(reservation_checkout, "%Y-%m-%d", True)
+
+                # In the following cases process a warning or error:
+                # 1) The reservation status is After, but the stay checkin
+                # is in the future process as an error or warning
+                # 2) The reservation status is being changed from After to Before
+                # 3) The reservation status is Before, but the dates are already passed
+                # (It's not possible to get this scenario with the external_api.py)
+
+                if not (checkin_isvalid and checkout_isvalid):
+                    # I think that if the checkin or checkout is not valid
+                    # we should raise an error and stop the processing,
+                    # but in the Stay model it is allowed to have a null for
+                    # checkin and checkout, so I'm not sure what is the correct
+                    # action
+                    pass
+
+                # Get Stay if it exists:
+                stay_exists = Stay.objects.filter(
+                    pms_reservation_id=reservation_id, 
+                    hotel=hotel,
+                ).exists()
+
+                if not stay_exists:
+                    # I'm not sure if CANCEL, INSTAY and AFTER for a stay that
+                    # doesn't exist should be allowed or we should
+                    # raise an error and return false
+
+                    new_stay = Stay(
+                        pms_reservation_id=reservation_id,
+                        hotel=hotel,
+                        guest=guest,
+                        pms_guest_id=reservation_guest_id,
+                        status=status,
+                        checkin=reservation_checkin,
+                        checkout=reservation_checkout,
+                    )
+                    new_stay.save()
+
+                else:
+                    try:
+                        old_stay = Stay.objects.get(
+                            pms_reservation_id=reservation_id, 
+                            hotel=hotel,
+                        )
+
+                        if old_stay.status != status:
+                            old_stay.status = status
+
+                        if old_stay.guest != guest:
+                            pass
+                            # Is a guest change allowed?
+
+                        # I'm not checking for pms_guest_id because
+                        # it gives us the phone and phone gives us the guest
+
+                        if old_stay.checkin != reservation_checkin:
+                            old_stay.checkin = reservation_checkin
+
+                        if old_stay.checkout != reservation_checkout:
+                            old_stay.checkout = reservation_checkout
+                        
+                        old_stay.save()
+
+                        # We want to do one db operation for
+
+
+                    except Exception as e:
+                        print(e)
+                        pass
+                        # Handle exception 
+
         return True
 
     def update_tomorrows_stays(self) -> bool:
@@ -147,18 +385,11 @@ class PMS_Mews(PMS):
 def get_pms(name):
     fullname = "PMS_" + name.capitalize()
 
-    print("fullname", fullname)
-
     # find all class names in this module
     # from https://stackoverflow.com/questions/1796180/
 
     current_module = sys.modules[__name__]
-
-    print("current_module", current_module)
-
     clsnames = [x[0] for x in inspect.getmembers(current_module, inspect.isclass)]
-
-    print("clsnames", clsnames)
 
     # if we have a PMS class for the given name, return an instance of it
     return getattr(current_module, fullname)() if fullname in clsnames else False
