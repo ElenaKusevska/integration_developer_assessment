@@ -1,0 +1,59 @@
+
+I wasn't sure if I should set the guest language in the db models by infering it from
+the country returned in the API. I decided not to do that for two reasons:
+
+1) It is not always obvious what is the preferred language for the Guest is from the country.
+For example 'CA', or Canada, is a bilingual country, so could be either an English or a French speaker.
+I also wasn't sure if 'GG' was meant to be an error, or to refer to an actual country code. 
+I googled 'GG', and there actually is a territory with this code. 
+There are also cases where the country is not set, and defined as "''" or "None".
+And for some country-language pairs a language is not defined in the db model for languages
+for example China- , Australia-Australian English, Brazil - Brazil Portugese. 
+If we set Australia and Brazil to British English and Portugal Portugese it would be inconsistent.
+
+For the cases where the language is not obvious or the country is not defined,
+I could have set the language to some default, for example english, but in the db.models
+a None for language is allowed. This tells me that there is a default in the system.
+
+2) And I wasn't sure how the system is set up. If the guest's language is inferred from
+the country, or it is defined somewhere else. For example the language of the UI 
+when the guest is logged in.
+
+So, if I set the language, I would either only set it for some cases, and not for others.
+Or I would set it for all cases, by choosing a default, which may be different from the default
+of the system and may override it.
+In both cases this would result in unpredictable behavior.
+
+If we decided to do a mapping like this, assuming we are only mapping defined country-language
+pairs, and leaving the language undefined for all other cases, I would have done it by defining 
+a dict constant that maps the country
+string to a language choice like this:
+
+            from hotel.models import Language
+
+            def map_country_to_language(country):
+
+                forbidden_country_codes = ["GG", "", "CA", "BR", "CN", None, "AU"]
+
+                map_country_to_language_dict = {
+                    "NL": Language.DUTCH,
+                    "DE": Language.GERMAN,
+                    "GB": Language.BRITISH_ENGLISH, 
+                }
+
+                language = None
+                if reservation_guest_country not in forbidden_country_codes:
+                    language = map_country_to_language_dict[reservation_guest_country]
+
+                return language
+            
+            try:
+                reservation_guest_details = json.loads(get_guest_details(reservation_details["GuestId"]))
+            except:
+                print("GUEST API FAILURE")
+
+            reservation_guest_country = reservation_guest_details["Country"]
+            guest_language = map_country_to_language(reservation_guest_country)
+            print("guest language", guest_language)
+
+
