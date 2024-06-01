@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 import inspect
 import logging
-from datetime import datetime
+import datetime
 import phonenumbers
 import time
 import json
@@ -23,6 +23,7 @@ from hotel.external_api import (
 
 from hotel.models import Stay, Guest, Hotel
 from hotel.constants import RESERVATION_STATUS_MAPPING
+from hotel.pms_functions import api_call_with_retries, phoneisvalid, dateisvalid
 
 
 class Event(BaseModel):
@@ -99,56 +100,6 @@ def handle_exception(message):
     # Store details about failed webhook for future processing
 
 
-def api_call_with_retries(apiname, *args):
-    i = 0
-    while i < 20:
-        try:
-            payload = apiname(*args)
-            try:
-                payload_dict = json.loads(payload)
-                return payload_dict
-            except JSONDecodeError as j:
-                logging.error(f"A JSONDecodeError occured on retry {i}: {j}. Retrying again...")
-            except Exception as e:
-                logging.error(f"An Exception occured on retry {i}: {e}. Retrying again...")
-
-        except APIError as a:
-            logging.error(f"APIError occured on retry {i}: {a}. Retrying again...")
-        except Exception as e:
-            logging.error(f"An API Exception occured on retry {i}: {e}. Retrying again...")
-
-        time.sleep(1)
-        i = i + 1
-    
-    raise Exception(f"Api Call for {apiname.__name__}. failed after 20 retries. "
-        "Raising Exception and preparing report")
-    # Store data or send a notification in the system about failed API call
-
-
-def dateisvalid(datestr, dateformat, propertyallowsnull):
-    # dateformat should be stored somewhere for the API
-    # propertyallowsnull should be stored somewhere for the specific hotel
-    # In this case I am using it as hardcoded values as an example
-    if datestr == None or datestr == '':
-        if propertyallowsnull:
-            return True
-        else:
-            return False
-    else:
-        try:
-            date = datetime.strptime(datestr, dateformat)
-            return True
-        except ValueError:
-            return False
-
-
-def phoneisvalid(phone, e164formatted):
-    x = phonenumbers.parse(phone, None)
-    # Not supplying a country because maybe the guest doesn't have a
-    # phone from his country because he is travelling a lot
-    return(phonenumbers.is_valid_number(x))
-
-
 class PMS_Mews(PMS):
     def clean_webhook_payload(self, payload: str) -> dict:
 
@@ -217,8 +168,8 @@ class PMS_Mews(PMS):
 
                 reservation_hotel_id = reservation_details["HotelId"]
                 if reservation_hotel_id != webhook_hotel_id:
-                    logging.error("reservation id in webhook payload {webhook_hotel_id} "
-                        "and in api response payload {reservation_hotel_id} doesn't "
+                    logging.error(f"reservation id in webhook payload {webhook_hotel_id} "
+                        f"and in api response payload {reservation_hotel_id} doesn't "
                         "match. Preparing a bug report and stopping webhook processing")
                     # Call function/method to prepare and post bug report or store
                     # information somewhere for later processing
@@ -274,7 +225,7 @@ class PMS_Mews(PMS):
                         phone=reservation_guest_phone, 
                         defaults = {"name": reservation_guest_name})
                 except IntegrityError as e:
-                    logging.error("Encountered error when get_or_create on guest: {e}"
+                    logging.error(f"Encountered integrity error when get_or_create on guest: {e}"
                         "Stopping webhook processing")
                     return False
                 except:
