@@ -2,6 +2,7 @@ import time
 import json
 import logging
 import datetime
+import os
 
 from json.decoder import JSONDecodeError
 
@@ -10,6 +11,9 @@ from django.db.utils import IntegrityError
 from hotel.models import Stay, Guest, Hotel
 from hotel.constants import RESERVATION_STATUS_MAPPING
 from hotel.external_api import APIError, get_guest_details
+
+logging.basicConfig(level=os.environ.get("LOGLEVEL", "DEBUG"))
+logger = logging.getLogger(__name__)
 
 
 def api_call_with_retries(apiname, *args):
@@ -21,14 +25,14 @@ def api_call_with_retries(apiname, *args):
                 payload_dict = json.loads(payload)
                 return payload_dict
             except JSONDecodeError as j:
-                logging.error(f"A JSONDecodeError occured on retry {i}: {j}. Retrying again...")
+                logger.error(f"A JSONDecodeError occured on retry {i}: {j}. Retrying again...")
             except Exception as e:
-                logging.error(f"An Exception occured on retry {i}: {e}. Retrying again...")
+                logger.error(f"An Exception occured on retry {i}: {e}. Retrying again...")
 
         except APIError as a:
-            logging.error(f"APIError occured on retry {i}: {a}. Retrying again...")
+            logger.error(f"APIError occured on retry {i}: {a}. Retrying again...")
         except Exception as e:
-            logging.error(f"An API Exception occured on retry {i}: {e}. Retrying again...")
+            logger.error(f"An API Exception occured on retry {i}: {e}. Retrying again...")
 
         time.sleep(1)
         i = i + 1
@@ -180,7 +184,6 @@ def create_or_update_stay(
                 checkout=reservation_checkout,
             )
             new_stay.save()
-            print(" new stay ", new_stay )
             return new_stay
         except Exception as e:
             raise Exception(f"Exception creating new stay: {e}")
@@ -214,7 +217,6 @@ def create_or_update_stay(
             # We want to do one db operation for
 
             return old_stay
-
 
         except Exception as e:
             raise Exception(f"Exception updating existing stay {e}")

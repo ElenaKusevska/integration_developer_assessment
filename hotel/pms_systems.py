@@ -6,6 +6,7 @@ import phonenumbers
 import time
 import json
 import sys
+import os
 
 from json.decoder import JSONDecodeError
 
@@ -24,6 +25,10 @@ from hotel.pms_functions import (
     create_or_update_stay,
     checkin_and_checkout_are_valid,
 )
+
+logging.basicConfig(level=os.environ.get("LOGLEVEL", "DEBUG"))
+logger = logging.getLogger(__name__)
+
 
 
 class Event(BaseModel):
@@ -95,8 +100,8 @@ class PMS(ABC):
         raise NotImplementedError
 
 
-def handle_exception(message):
-    logging.error(message)
+def handle_webhook_exception(message):
+    logger.error(message)
     # Store details about failed webhook for future processing
 
 
@@ -108,11 +113,11 @@ class PMS_Mews(PMS):
             payload_dict = json.loads(payload)
 
         except JSONDecodeError as j:
-            handle_exception(f"A jsonDecodeError has occured: {j}. Stopping webhook processing")
+            handle_webhook_exception(f"A jsonDecodeError has occured: {j}. Stopping webhook processing")
             return {"payload_valid": False}
 
         except Exception as e:
-            handle_exception(f"An exception has occured: {e}. Stopping webhook processing")
+            handle_webhook_exception(f"An exception has occured: {e}. Stopping webhook processing")
             return {"payload_valid": False}
 
         # Test that the payload follows the appropriate schema.
@@ -122,11 +127,11 @@ class PMS_Mews(PMS):
             p = Payload(**payload_dict)
 
         except ValidationError as v:
-            handle_exception(f"A payload validation error has occured: {v}. Stopping webhook processing")
+            handle_webhook_exception(f"A payload validation error has occured: {v}. Stopping webhook processing")
             return {"payload_valid": False}
 
         except Exception as e:
-            handle_exception(f"An exception has occured: {e}. Stopping webhook processing")
+            handle_webhook_exception(f"An exception has occured: {e}. Stopping webhook processing")
             return {"payload_valid": False}
 
         # I could also add some code here to test the format of the Id strings
@@ -141,7 +146,7 @@ class PMS_Mews(PMS):
     # make atomic
     def handle_webhook(self, webhook_data: dict) -> bool:
         if not webhook_data["payload_valid"]:
-            logging.error("Webhook payload invalid. Stoping webhook processing")
+            logger.error("Webhook payload invalid. Stoping webhook processing")
             # store information about failed webhook
             return False
 
@@ -153,7 +158,7 @@ class PMS_Mews(PMS):
             if event_name == "ReservationUpdated":
                 # Get reservation data:
                 reservation_id = event["Value"]["ReservationId"]
-                logging.info("Processing reservation update event for reservation Id {reservation_id}")
+                logger.info("Processing reservation update event for reservation Id {reservation_id}")
 
                 try:
                     reservation_details = api_call_with_retries(
@@ -161,7 +166,7 @@ class PMS_Mews(PMS):
                         reservation_id
                     )
                 except Exception as e:
-                    logging.error(f"Api call for get_reservation_details failed with Exception '{e}'. "
+                    logger.error(f"Api call for get_reservation_details failed with Exception '{e}'. "
                         "Stopping webhook processing")
                     return False
 
@@ -175,7 +180,7 @@ class PMS_Mews(PMS):
                 # Get Hotel
                 reservation_hotel_id = reservation_details["HotelId"]
                 if reservation_hotel_id != webhook_hotel_id:
-                    logging.error(f"hotel id in webhook payload {webhook_hotel_id} "
+                    logger.error(f"hotel id in webhook payload {webhook_hotel_id} "
                         f"and in api response payload {reservation_hotel_id} doesn't "
                         "match. Preparing a bug report and stopping webhook processing")
                     # Call function/method to prepare and post bug report or store
@@ -194,7 +199,7 @@ class PMS_Mews(PMS):
                 try:
                     guest = get_guest_from_reservation_guest_id(reservation_guest_id)
                 except Exception as e:
-                    logging.error(f"Exception when getting guest data: {e}")
+                    logger.error(f"Exception when getting guest data: {e}")
                     return False
 
                 # Create or Update Stay
@@ -211,6 +216,10 @@ class PMS_Mews(PMS):
                         hotel=hotel,)
                 except Exception as e:
                     raise Exception(f"Exception creating or updating stay({e})")
+            
+            else:
+                return False 
+                # If it is not a reservation update, we don't have a procedure defined
 
         return True
 
@@ -219,8 +228,8 @@ class PMS_Mews(PMS):
         tomorrow = (datetime.date.today() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
         api_stays = api_call_with_retries(get_reservations_for_given_checkin_date, tomorrow)
 
-        for api_stay in api_stays[0:3]:
-            logging.info("Processing reservation update for tomorrow stay with reservation Id {reservation_id}")
+        for api_stay in api_stays:
+            logger.info("Processing reservation update for tomorrow stay with reservation Id {reservation_id}")
 
             # Check dates:
             if not checkin_and_checkout_are_valid(api_stay["CheckInDate"], api_stay["CheckOutDate"]):
@@ -231,7 +240,7 @@ class PMS_Mews(PMS):
             try:
                 guest = get_guest_from_reservation_guest_id(api_stay["GuestId"])
             except Exception as e:
-                logging.error(f"Exception when getting guest data: {e}")
+                logger.error(f"Exception when getting guest data: {e}")
                 return False
 
             try:
@@ -265,7 +274,7 @@ class PMS_Mews(PMS):
                 stay.pms_reservation_id,
             )
         except Exception as e:
-            logging.error(f"Api call for get_reservation_details failed with Exception '{e}'. "
+            logger.error(f"Api call for get_reservation_details failed with Exception '{e}'. "
                 "when checking for stay_has_breakfast")
             return False
 
@@ -273,10 +282,10 @@ class PMS_Mews(PMS):
             if isinstance(reservation_details["BreakfastIncluded"], bool):
                 return(reservation_details["BreakfastIncluded"])
             else:
-                logging.error(f"BreakfastIncluded '{e}' not bool. ")
+                logger.error(f"BreakfastIncluded '{e}' not bool. ")
                 return None
         else:
-            logging.error(f"BreakfastIncluded not in API payload")
+            logger.error(f"BreakfastIncluded not in API payload")
             return None
 
 
