@@ -155,8 +155,6 @@ class PMS_Mews(PMS):
                 reservation_id = event["Value"]["ReservationId"]
                 logging.info("Processing reservation update event for reservation Id {reservation_id}")
 
-                print("rservation_id", reservation_id)
-
                 try:
                     reservation_details = api_call_with_retries(
                         get_reservation_details,
@@ -191,8 +189,6 @@ class PMS_Mews(PMS):
                     # exist in the db, if I should create it, or raise an error.
                     pass 
 
-                print("hotel", hotel)
-
                 # Get Guest:
                 reservation_guest_id = reservation_details["GuestId"]
                 try:
@@ -200,8 +196,6 @@ class PMS_Mews(PMS):
                 except Exception as e:
                     logging.error(f"Exception when getting guest data: {e}")
                     return False
-
-                print("guest", guest)
 
                 # Create or Update Stay
                 reservation_status = reservation_details["Status"]
@@ -218,14 +212,11 @@ class PMS_Mews(PMS):
                 except Exception as e:
                     raise Exception(f"Exception creating or updating stay({e})")
 
-                print("stay", stay)
-
         return True
 
 
     def update_tomorrows_stays(self) -> bool:
         tomorrow = (datetime.date.today() - datetime.timedelta(days=1)).strftime("%Y-%m-%d")
-        print(type(tomorrow), tomorrow)
         api_stays = api_call_with_retries(get_reservations_for_given_checkin_date, tomorrow)
 
         for api_stay in api_stays[0:3]:
@@ -237,15 +228,11 @@ class PMS_Mews(PMS):
                     f"or checkout {api_stay['CheckOutDate']}")
             # Validate checkin is tomorrow
 
-            print(api_stay)
-
             try:
                 guest = get_guest_from_reservation_guest_id(api_stay["GuestId"])
             except Exception as e:
                 logging.error(f"Exception when getting guest data: {e}")
                 return False
-
-            print("guest", guest)
 
             try:
                 hotel = Hotel.objects.get(pms_hotel_id=api_stay['HotelId'])
@@ -253,8 +240,6 @@ class PMS_Mews(PMS):
                 # I wasn't sure what the action should be in case the hotel doesn't
                 # exist in the db, if I should create it, or raise an error.
                 pass 
-
-            print("hotel", hotel)
 
             try: 
                 stay = create_or_update_stay(
@@ -267,16 +252,32 @@ class PMS_Mews(PMS):
                     hotel=hotel,
                     )
             except Exception as e:
-                print("Exception", e)
+                raise Exception(f"Exception creating or updating stay({e})")
                 return False
-
-            print("stay", stay, stay.status, stay.checkin, stay.checkout)
 
         return True
 
+
     def stay_has_breakfast(self, stay: Stay) -> Optional[bool]:
-        # TODO: Implement the method
-        return None
+        try:
+            reservation_details = api_call_with_retries(
+                get_reservation_details,
+                stay.pms_reservation_id,
+            )
+        except Exception as e:
+            logging.error(f"Api call for get_reservation_details failed with Exception '{e}'. "
+                "when checking for stay_has_breakfast")
+            return False
+
+        if "BreakfastIncluded" in reservation_details:
+            if isinstance(reservation_details["BreakfastIncluded"], bool):
+                return(reservation_details["BreakfastIncluded"])
+            else:
+                logging.error(f"BreakfastIncluded '{e}' not bool. ")
+                return None
+        else:
+            logging.error(f"BreakfastIncluded not in API payload")
+            return None
 
 
 def get_pms(name):
