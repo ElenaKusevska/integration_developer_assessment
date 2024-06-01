@@ -1,3 +1,6 @@
+OK, I saw in pms_systems.py in the description for update tomorows stays that
+language != country, but I'd already spent a lot of time thinking about this 
+when I saw it :)
 
 I wasn't sure if I should set the guest language in the db models by infering it from
 the country returned in the API. I decided not to do that for two reasons:
@@ -33,7 +36,7 @@ string to a language choice like this:
 
             def map_country_to_language(country):
 
-                forbidden_country_codes = ["GG", "", "CA", "BR", "CN", None, "AU"]
+                allowed_country_codes = ["NL", "DE", "GB", ]
 
                 map_country_to_language_dict = {
                     "NL": Language.DUTCH,
@@ -42,7 +45,7 @@ string to a language choice like this:
                 }
 
                 language = None
-                if reservation_guest_country not in forbidden_country_codes:
+                if reservation_guest_country in allowed_country_codes:
                     language = map_country_to_language_dict[reservation_guest_country]
 
                 return language
